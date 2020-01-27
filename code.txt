@@ -1,0 +1,492 @@
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <errno.h>
+#include <string.h>
+#include <pthread.h>
+#include <ctype.h>
+
+typedef struct{
+	int row;
+	int col;
+	int (*sudoku_grid)[9];
+}parameters;
+
+void *validateSubgrid(void *);
+void *validateRows(void *);
+void *validateCols(void *);
+int readSudokuGrid(int (*grid)[9], int, FILE *);
+
+#define NTHREADS 11
+
+int main(int argc, char *argv[]){
+	if(argc < 2){
+		fprintf(stderr, "Usage: executable-name [input-file]\n");
+		exit(EXIT_FAILURE);
+	}
+
+	int sudoku_grid[9][9];
+	int n_grids;
+	FILE *fp = fopen(argv[1], "r");
+
+	// Read number of sudoku grids to validate
+	fscanf(fp,"%d",&n_grids);
+	fseek(fp, 1, SEEK_CUR); // Seek past newline
+
+	// Initalize parameters for subgrid evaluation threads
+	parameters *data[9];
+	int row, col, i = 0;
+	for(row = 0; row < 9; row += 3)
+	{
+		for(col = 0; col < 9; col += 3, ++i)
+		{
+			data[i] = (parameters *)malloc(sizeof(parameters));
+			if(data[i] == NULL){
+				int err = errno;
+				puts("malloc failed");
+				puts(strerror(err));
+				exit(EXIT_FAILURE);
+			}
+			data[i]->row = row;
+			data[i]->col = col;
+			data[i]->sudoku_grid = sudoku_grid;
+		}
+	}
+
+	// Validate all sudoku grids in file
+	pthread_t tid[NTHREADS];
+	int g, p, j, h, retCode, check_flag = 0, t_status[NTHREADS];
+	for(g = 1; g <= n_grids; ++g){
+		if(readSudokuGrid(sudoku_grid, g, fp)){
+			puts("something happened reading the grid from the file");
+			exit(EXIT_FAILURE);
+		}
+
+		// Create threads for subgrid validation 
+		for(p = 0; p < 9; ++p){
+			if(retCode = pthread_create(&tid[p], NULL, validateSubgrid, (void *)data[p])){
+				fprintf(stderr, "Error - pthread_create() return code: %d\n", retCode);
+				exit(EXIT_FAILURE);
+			}
+		}
+
+
+		// Create threads for row and column validation
+		if(retCode = pthread_create(&tid[9], NULL, validateRows, (void *)data[0])){
+			fprintf(stderr, "Error - pthread_create() return code: %d\n", retCode);
+			exit(EXIT_FAILURE);
+		}
+		if(retCode = pthread_create(&tid[10], NULL, validateCols, (void *)data[0])){
+			fprintf(stderr, "Error - pthread_create() return code: %d\n", retCode);
+			exit(EXIT_FAILURE);
+		}
+
+		// Join all threads so main waits until the threads finish
+		for(j = 0; j < NTHREADS; ++j){
+			if(retCode = pthread_join(tid[j], (void *)&t_status[j])){
+				fprintf(stderr, "Error - pthread_join() return code: %d\n", retCode);
+				exit(EXIT_FAILURE);
+			}
+		}
+
+		// Check the status returned by each thread
+		for(h = 0; h < NTHREADS; ++h){
+			if(t_status[h]){
+				check_flag = 1;
+				break;
+			}
+		}
+		if(check_flag){
+			printf("Sudoku Puzzle: %d - Invalid\n", g);
+		}else{
+			printf("Sudoku Puzzle: %d - Valid\n", g);
+		}
+		check_flag = 0;
+	} // End evaluation for loop
+
+	// Free memory and close the file
+	int k;
+	for(k = 0; k < 9; ++k){
+		free(data[k]);
+	}
+	fclose(fp);
+
+	return 0;
+}
+
+/**
+     * Checks if the subgrid of the sudoku grid is valid.
+     * 
+     * @param data
+     *      Contains the sudoku grid and the starting row and column
+     *		of the subgrid to test.
+     */
+void *validateSubgrid(void *data){
+	int digit_check[10] = {0};
+	parameters *params = (parameters *)data;
+	int i, j;
+	for(i = params->row; i < params->row + 3; ++i){
+		for(j = params->col; j < params->col + 3; ++j){
+			if(digit_check[params->sudoku_grid[i][j]] == 1){
+				return (void *)-1; // Invalid sudoku subgrid
+			}
+			digit_check[params->sudoku_grid[i][j]] = 1;
+		}
+	}
+	return (void *)0; // Valid sudoku subgrid
+}
+
+/**
+     * Checks whether the rows of the sudoku grid are valid.
+     * 
+     * @param data
+     *      Contains the sudoku grid to test.
+     */
+void *validateRows(void *data){
+	int digit_check[10] = {0};
+	parameters *params = (parameters *)data;
+	int i, j;
+	for(i = 0; i < 9; ++i){
+		for(j = 0; j < 9; ++j){
+			if(digit_check[params->sudoku_grid[i][j]] == 1){
+				return (void *)-1; // Invalid sudoku rows
+			}
+			digit_check[params->sudoku_grid[i][j]] = 1;
+		}
+		// Reinitalize check array for next row
+		memset(digit_check, 0, sizeof(int)*10);
+	}
+	return (void *)0; // Valid sudoku rows
+}
+
+/**
+     * Checks whether the columns of the sudoku grid are valid.
+     * 
+     * @param data
+     *      Contains the sudoku grid to test.
+     */
+void *validateCols(void *data){
+	int digit_check[10] = {0};
+	parameters *params = (parameters *)data;
+	int i, j;
+	for(i = 0; i < 9; ++i){
+		for(j = 0; j < 9; ++j){
+			if(digit_check[params->sudoku_grid[j][i]] == 1){ // Ensure the digit doesn't appear more than once in the subgrid
+				return (void *)-1; // Invalid sudoku columns
+			}
+			digit_check[params->sudoku_grid[j][i]] = 1;
+		}
+		// Reinitalize check array for next column
+		memset(digit_check, 0, sizeof(int)*10);
+	}
+	return (void *)0; // Valid sudoku columns
+}
+
+/**
+     * Reads in a sudoku grid from a file.
+     * 
+     * @param grid
+     *      Where to store the grid.
+     * @param grid_no 
+     *      Grid number to read from file.
+     * @param fp 
+     *      File to read from.
+     */
+int readSudokuGrid(int (*grid)[9], int grid_no, FILE *fp){
+	int garbage;
+	fseek(fp, 0, SEEK_SET);
+	fscanf(fp, "%d", &garbage);
+	fseek(fp, 1, SEEK_CUR); // Seek to start of first sudoku grid
+
+	if(grid_no < 1){
+		puts("Not a valid grid number. Please specify a grid number > 0.");
+		return -1;
+	}
+	else if(grid_no > 1){ // Seek past newlines from previous grids
+		fseek(fp, 9*(grid_no - 1), SEEK_CUR); // 10 newlines per grid when more than one grid
+	}
+
+	fseek(fp, (grid_no - 1)*sizeof(char)*81, SEEK_CUR); // Seek to the start of the corresponding grid number
+
+	char entry;
+	int i = 0, j = 0, totalValues = 0;
+	while((fread(&entry, 1, 1, fp)) > 0 && totalValues < 81){ // Read 81 digits from file: sudoku grid 9x9 = 81
+		if(entry != '\n'){ // Ignore newline
+			if(isdigit(entry)){
+				++totalValues;
+				grid[i][j] = entry - '0'; // Store integer representation
+				++j;
+				if(j == 9){
+					j = 0;
+					++i;
+				}
+			}
+			else{ // A non-digit character was read
+				return -1;
+			}
+		}
+	}
+
+	return 0; // Successfully read sudoku grid from file
+}
+
+
+
+
+
+//////
+
+
+
+/////
+
+
+2nd code
+#include "sudoku.h"
+
+int main(void){
+
+	pthread_t thread_id[NUMTHREADS];
+				
+	int idIndex = 0;
+	int i, k, j;	
+	int Correct = 0;
+
+	parameters **data = malloc( NUMTHREADS * sizeof(parameters*) );	//Initialize an array of pointers
+	for( i=0; i<NUMTHREADS; i++ )
+		data[i] = malloc( sizeof (parameters) );
+
+	idIndex=0; //Index to go through all the thread_id's
+
+	//Generate the threads for all the subGrids.
+	for( k=0; k<3; k++ ){
+		for( j=0; j<3; j++ ) {
+			data[idIndex]->row = yCoord[k]; 
+			data[idIndex]->column = xCoord[j];
+			data[idIndex]->threadNum = idIndex+1;
+			pthread_create(&thread_id[idIndex], NULL, subgridValidator, (void *)data[idIndex]);		
+			idIndex++;
+		}
+	}
+	
+	//Thread for the columnValidator
+	data[idIndex]->row = 0; 
+	data[idIndex]->column = 0;
+	data[idIndex]->threadNum = idIndex+1;
+	pthread_create(&thread_id[idIndex], NULL, columnValidator, (void *)data[idIndex]);
+	idIndex++;
+	
+	//Thread for the rowValidator
+	data[idIndex]->row = 0; 
+	data[idIndex]->column = 0;
+	data[idIndex]->threadNum = idIndex+1;
+	pthread_create(&thread_id[idIndex], NULL, rowValidator, (void *)data[idIndex]);
+
+	for(i=0;i<NUMTHREADS;i++){
+		pthread_join(thread_id[i],NULL);	//Join all the threads
+		Correct=Correct+check[i];		//Count the value of all the checks.
+	}
+
+	if( Correct == NUMTHREADS )	//Check to see if all the threads provided a check value of 1.
+		printf("~Provided sudoku is a valid solution~\n");
+	else
+		printf("~Provided sudoku is not a valid solution~\n"); 
+
+	//Free all the allocated memory
+	for(i=0;i<NUMTHREADS;i++)
+		free(data[i]);	
+	free(data);
+
+	return 0;
+}
+
+//This thread checks to see that all the columns in the Sudoku Solution contain the numbers 1-9.
+void  *columnValidator(void *argument){
+
+	parameters *args= (parameters *) argument;
+	int k,i,j;
+	int countInner=0;
+	int countColumn=0;
+	int threadNum;
+
+	threadNum = args->threadNum;
+
+	for( k=0; k<9; k++ ){ 	//Iterate through the 9 columns
+		countInner=0;
+		for( i=1; i<=9; i++ ){	//Look for the number i in the kth column	
+			for( j=0; j<9; j++ ){	// Iterate through the kth column 
+				if( SudokuArray[j][k]==i ){
+					countInner++;	//Increase count everytime it finds a value in the column
+					break;		//Break out of loop and look for next number
+				}
+			}
+		}
+		if( countInner==9 ) //If it found all the numbers in the kth column increase the countColumn
+			countColumn++;
+	}
+
+	if( countColumn==9 )
+		check[threadNum-1]=1;
+	else
+		check[threadNum-1]=0;
+	
+	pthread_exit(NULL);
+	
+}
+
+//This thread checks to see that all the rows in the Sudoku Solution contain the numbers 1-9.
+void *rowValidator(void* argument){
+	parameters *args= (parameters *) argument;	
+	int k,i,j;	
+	int countInner=0;
+	int countRow=0;
+	int threadNum;
+
+	threadNum = args->threadNum;
+
+	for( k=0; k<9; k++ ){ //Iterate through the 9 rows
+		countInner=0;
+		for( i=1; i<=9; i++ ){	//Look for the number i in the kth row (iterate through the columns)		
+			for( j=0; j<9; j++ ){	//Iterate through the kth row.
+				if( SudokuArray[k][j]==i ){
+					countInner++;	//Increase count everytime it finds a value in the row
+					break;		//Break out of loop and look for next number
+				}
+			}
+		}
+		if( countInner==9 ) //If it found all the numbers in the kth row increase the countRow
+			countRow++;
+	}
+
+	if( countRow ==9 )
+		check[threadNum-1]=1;
+	else
+		check[threadNum-1]=0;
+
+	pthread_exit(NULL);
+
+}
+
+//This tread checks to see if a given subgrid of the Sudoku solution contain the numbers 1-9
+void *subgridValidator(void * argument){
+	parameters *args= (parameters *) argument;	
+	int row,col,threadNum;
+	int row3,col3;
+	int i=0;
+	int count=0;	
+	
+	col = args->column; //Column index of where to begin checking subgrid
+	row = args->row;    //Row index of where to begin checking subgrid
+	threadNum = args->threadNum;
+
+	for( i=1; i<=9; i++ ){	//Iterate through the numbers 1-9
+		for( row3=0; row3<3; row3++){	//Iterate through the rows of the subgrid
+			for( col3=0; col3<3; col3++ ){	//Iterate through the columns of the subgrid
+				//Look for the number i in the subgrid also check to see that 
+				//the next count value would be the next number we are looking for (i).
+				if( SudokuArray[row3+row][col3+col] == i && (count+1)==i )
+					count++;
+			}
+		}
+	}
+
+	if( count==9 )
+		check[threadNum-1]=1;
+	else
+		check[threadNum-1]=0;
+
+	pthread_exit(NULL);
+
+}
+
+
+
+
+
+
+#define NUMTHREADS 11
+#define GRIDS 9
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <pthread.h>
+
+int xCoord[3]={0,3,6};	//Column index at which a subgrid can begin
+int yCoord[3]={0,3,6};	//Row index at which a subgrid can begin
+int check[NUMTHREADS];
+
+typedef struct {
+	int row;
+	int column;
+	int threadNum;
+} parameters;
+
+
+void *rowValidator(void *argument);
+void *columnValidator(void *argument);
+void *subgridValidator(void *argument);
+
+//Test Case 1 --Valid
+/*
+int SudokuArray[9][9]={ {2,4,8,3,9,5,7,1,6},
+		        {5,7,1,6,2,8,3,4,9},
+		        {9,3,6,7,4,1,5,8,2},
+		        {6,8,2,5,3,9,1,7,4},
+		        {3,5,9,1,7,4,6,2,8},
+		        {7,1,4,8,6,2,9,5,3},
+		        {8,6,3,4,1,7,2,9,5},
+		        {1,9,5,2,8,6,4,3,7},
+		        {4,2,7,9,5,3,8,6,1} };
+*/
+
+//Test Case 2 --Valid
+/*
+int SudokuArray[9][9]={ {1,4,5,3,2,7,6,9,8},
+		        {8,3,9,6,5,4,1,2,7},
+		        {6,7,2,9,1,8,5,4,3},
+		        {4,9,6,1,8,5,3,7,2},
+		        {2,1,8,4,7,3,9,5,6},
+		        {7,5,3,2,9,6,4,8,1},
+		        {3,6,7,5,4,2,8,1,9},
+		        {9,8,4,7,6,1,2,3,5},
+		        {5,2,1,8,3,9,7,6,4} };
+*/
+
+//Test Case 3 --Invalid
+/*
+int SudokuArray[9][9]={ {1,4,5,3,2,7,6,9,8},
+		        {8,3,9,6,5,4,1,2,7},
+		        {6,7,2,9,1,8,5,4,3},
+		        {4,9,6,1,8,5,3,7,2},
+		        {2,1,8,4,7,3,9,5,6},
+		        {7,5,3,2,9,6,4,8,1},
+		        {3,6,7,5,4,2,1,8,9},	//Swapped the 1 and 8
+		        {9,8,4,7,6,1,2,3,5},
+		        {5,2,1,8,3,9,7,6,4} };
+*/
+
+
+//Test Case 4 --Valid
+/*
+int SudokuArray[9][9]={ {5,3,9,2,8,7,1,4,6},
+		        {8,1,7,6,3,4,5,9,2},
+		        {4,2,6,1,9,5,7,3,8},
+		        {7,6,5,3,1,2,9,8,4},
+		        {9,4,1,5,6,8,2,7,3},
+		        {3,8,2,4,7,9,6,5,1},
+		        {1,9,4,7,2,3,8,6,5},
+		        {6,5,8,9,4,1,3,2,7},
+		        {2,7,3,8,5,6,4,1,9} };
+*/
+
+//Test Case 5 --Invalid
+
+int SudokuArray[9][9]={ {3,2,9,6,5,7,8,4,1},
+		        {7,4,5,8,3,1,2,9,6},
+		        {6,1,8,2,4,9,3,7,5},
+		        {1,9,3,4,6,8,5,2,7},
+		        {2,7,6,1,9,5,4,9,3},
+		        {8,5,4,3,9,1,6,1,9},
+		        {4,3,2,7,1,6,9,5,8},
+		        {5,8,7,9,2,3,1,6,4},
+		        {9,6,1,5,8,4,7,3,2} };
